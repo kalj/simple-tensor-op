@@ -22,7 +22,7 @@ void swap(number *&a, number *&b)
 }
 
 
-__constant__ double phi[ELEM_DEGREE+1][ELEM_DEGREE+1];
+__constant__ number phi[ELEM_DEGREE+1][ELEM_DEGREE+1];
 
 enum Direction { X, Y, Z};
 enum Transpose { TR, NOTR};
