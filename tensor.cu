@@ -48,9 +48,15 @@ __device__ void reduce(number uloc[n][n][n])
 
   const unsigned int reduction_idx = dir==X ? threadIdx.x : dir==Y ? threadIdx.y : threadIdx.z;
 
-  for(int i = 0; i < n; ++i)
-    tmp += (uloc[(dir==X) ? i : threadIdx.x][(dir==Y) ? i : threadIdx.y][(dir==Z) ? i : threadIdx.z])*
-      phi[(tr==TR) ? i : reduction_idx][(tr==TR) ? reduction_idx : i];
+  for(int i = 0; i < n; ++i) {
+
+    const unsigned int xidx=(dir==X) ? i : threadIdx.x;
+    const unsigned int yidx=(dir==Y) ? i : threadIdx.y;
+    const unsigned int zidx=(dir==Z) ? i : threadIdx.z;
+    const unsigned int phi_idx1 = (tr==TR) ? i : reduction_idx;
+    const unsigned int phi_idx2 = (tr==TR) ? reduction_idx : i;
+    tmp += uloc[xidx][yidx][zidx]* phi[phi_idx1][phi_idx2];
+  }
 
   __syncthreads();
 
