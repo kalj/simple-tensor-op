@@ -12,7 +12,7 @@
 #define DIM 3
 #define N_ITERATIONS 100
 
-typedef double number;
+typedef float number;
 
 void swap(number *&a, number *&b)
 {
@@ -28,7 +28,7 @@ enum Direction { X, Y, Z};
 enum Transpose { TR, NOTR};
 
 template <Direction dir, Transpose tr, unsigned int n>
-__device__ void reduce(number uloc[n][n][n])
+__device__ void reduce(number uloc[n][n][n], number my_phi[n])
 {
   // Here's what this function does for the case when dir==X and tr==TR:
 
@@ -64,6 +64,64 @@ __device__ void reduce(number uloc[n][n][n])
 
 }
 
+
+
+template <unsigned int n>
+__device__ void reduce_X(number uloc[n][n][n], number my_phi[n])
+{
+  number tmp = 0;
+
+  // Load into registers:
+  //float my_val = uloc[threadIdx.x][threadIdx.y][threadIdx.z];
+  //__syncthreads();
+
+  #pragma unroll  
+  for(int i = 0; i < n; ++i)
+    tmp += uloc[threadIdx.x][threadIdx.y][threadIdx.z]*my_phi[i];
+
+    //tmp += (__shfl(my_val,i))*my_phi[i];
+
+  uloc[threadIdx.x][threadIdx.y][threadIdx.z] = tmp;
+
+}
+
+template <unsigned int n>
+__device__ void reduce_Y(number uloc[n][n][n], number my_phi[n])
+{
+  number tmp = 0;
+
+  // Load into registers:
+  //float my_val = uloc[threadIdx.y][threadIdx.x][threadIdx.z];
+  //__syncthreads();
+
+  #pragma unroll  
+  for(int i = 0; i < n; ++i)
+    tmp += uloc[threadIdx.y][threadIdx.x][threadIdx.z]*my_phi[i];
+
+//    tmp += (__shfl(my_val,i))*my_phi[i];
+
+  uloc[threadIdx.y][threadIdx.x][threadIdx.z] = tmp;
+
+}
+
+template <unsigned int n>
+__device__ void reduce_Z(number uloc[n][n][n], number my_phi[n])
+{
+  number tmp = 0;
+  // Load into registers:
+  //float my_val = uloc[threadIdx.y][threadIdx.z][threadIdx.x];
+  //__syncthreads();
+
+  #pragma unroll  
+  for(int i = 0; i < n; ++i)
+    tmp += uloc[threadIdx.y][threadIdx.z][threadIdx.x]*my_phi[i];
+
+    //tmp += (__shfl(my_val,i) )*my_phi[i];
+
+  uloc[threadIdx.y][threadIdx.z][threadIdx.x] = tmp;
+}
+
+
 template <unsigned int n>
 __global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob, const number *coeff)
 {
@@ -71,6 +129,18 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   const unsigned int tid = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
 
   __shared__ number uloc[n][n][n];
+
+  // Block dmension is 5x5x5
+
+
+  ///////////////////////////////////////////////////////////////
+  // Stage PHI in registers:
+  number my_phi[n];
+  #pragma unroll
+  for(int i = 0; i < n; i++)
+    my_phi[i] = phi[threadIdx.x][i];
+  ///////////////////////////////////////////////////////////////
+
 
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
@@ -82,16 +152,19 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // Phase 2a-c: Interpolate -- reduce in each coordinate direction
   //---------------------------------------------------------------------------
   // reduce along x -- O(n*n*n*n)
-  reduce<X,NOTR,n> (uloc);
+  
+  reduce_X(uloc, my_phi);
+  //reduce<X,NOTR,n> (uloc, my_phi);
   __syncthreads();
 
   // reduce along y
-  reduce<Y,NOTR,n> (uloc);
+  //reduce<Y,NOTR,n> (uloc, my_phi);
+  reduce_Y(uloc, my_phi);
   __syncthreads();
 
+  reduce_Z(uloc, my_phi);
   // reduce along z
-  reduce<Z,NOTR,n> (uloc);
-
+  //reduce<Z,NOTR,n> (uloc, my_phi);
   // now we should have values at quadrature points
   // no synch is necessary since we are only working on local data.
 
@@ -101,22 +174,28 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
 
   uloc[threadIdx.x][threadIdx.y][threadIdx.z] *= coeff[cell*n*n*n+tid];
 
+  ///////////////////////////////////////////////////////////////
+  // Stage PHI in registers: - transposed
+  #pragma unroll
+  for(int i = 0; i < n; i++)
+    my_phi[i] = phi[i][threadIdx.x];
+
   __syncthreads();
 
   //---------------------------------------------------------------------------
   // Phase 4a-c: Integrate  -- reduce with transpose
   //---------------------------------------------------------------------------
 
-  // reduce along x
-  reduce<X,TR,n> (uloc);
+  reduce_X(uloc, my_phi);
+
   __syncthreads();
 
   // reduce along y
-  reduce<Y,TR,n> (uloc);
+  reduce_Y(uloc, my_phi);
+
   __syncthreads();
 
-  // reduce along z
-  reduce<Z,TR,n> (uloc);
+  reduce_Z(uloc, my_phi);
 
   // __syncthreads();
   // no synch is necessary since we are only working on local data.
@@ -124,7 +203,6 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   //---------------------------------------------------------------------------
   // Phase 5: write back to result
   //---------------------------------------------------------------------------
-
   // here, we get race conditions, but in the original code, we would launch
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
