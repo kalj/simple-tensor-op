@@ -6,6 +6,8 @@
 #include "utils.h"
 #include "cuda_utils.cuh"
 #include "timer.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 #define NSUBDIV (1<<5)
 #define ELEM_DEGREE 4
@@ -13,6 +15,24 @@
 #define N_ITERATIONS 100
 
 typedef float number;
+
+int error_check()
+{
+
+
+    cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if( err != cudaSuccess)
+  {
+    printf("\n Error: %s \n Line: %d \n In file: %s", cudaGetErrorString(err), __LINE__, __FILE__);
+    fflush(stdout);
+    return -1;
+  } 
+
+  return 0; 
+
+}
+
 
 void swap(number *&a, number *&b)
 {
@@ -67,138 +87,121 @@ __device__ void reduce(number uloc[n][n][n], number my_phi[n])
 
 
 template <unsigned int n>
-__device__ void reduce_X(number uloc[n][n][n], number my_phi[n])
+__device__  void reduce_X(number my_uloc, number my_phi[n], int x, int y)
 {
-  number tmp = 0;
-
-  // Load into registers:
-  //float my_val = uloc[threadIdx.x][threadIdx.y][threadIdx.z];
-  //__syncthreads();
-
+  
+  number tmp = 0.0f;
   #pragma unroll  
   for(int i = 0; i < n; ++i)
-    tmp += uloc[threadIdx.x][threadIdx.y][threadIdx.z]*my_phi[i];
+    tmp += __shfl(my_uloc, i + y*5)*my_phi[i];//uloc[i  + y*n + slice*n*n]*my_phi[i];
+    // update:
+    my_uloc = tmp;
+}
+template <unsigned int n>
+__device__ __forceinline__ void reduce_Y(number my_uloc, number my_phi[n], int x, int y)
+{
 
-    //tmp += (__shfl(my_val,i))*my_phi[i];
-
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] = tmp;
-
+  number tmp = 0.0f;
+  #pragma unroll  
+  for(int i = 0; i < n; ++i)
+    tmp += __shfl(my_uloc, y + i*5)*my_phi[i];//uloc[i  + y*n + slice*n*n]*my_phi[i];
+    // update:
+    my_uloc = tmp;
 }
 
 template <unsigned int n>
-__device__ void reduce_Y(number uloc[n][n][n], number my_phi[n])
+__device__ __forceinline__ void reduce_Z(number my_uloc, number my_phi[n], int x, int y)
 {
-  number tmp = 0;
 
-  // Load into registers:
-  //float my_val = uloc[threadIdx.y][threadIdx.x][threadIdx.z];
-  //__syncthreads();
-
+   number tmp = 0.0f;
   #pragma unroll  
   for(int i = 0; i < n; ++i)
-    tmp += uloc[threadIdx.y][threadIdx.x][threadIdx.z]*my_phi[i];
-
-//    tmp += (__shfl(my_val,i))*my_phi[i];
-
-  uloc[threadIdx.y][threadIdx.x][threadIdx.z] = tmp;
-
-}
-
-template <unsigned int n>
-__device__ void reduce_Z(number uloc[n][n][n], number my_phi[n])
-{
-  number tmp = 0;
-  // Load into registers:
-  //float my_val = uloc[threadIdx.y][threadIdx.z][threadIdx.x];
-  //__syncthreads();
-
-  #pragma unroll  
-  for(int i = 0; i < n; ++i)
-    tmp += uloc[threadIdx.y][threadIdx.z][threadIdx.x]*my_phi[i];
-
-    //tmp += (__shfl(my_val,i) )*my_phi[i];
-
-  uloc[threadIdx.y][threadIdx.z][threadIdx.x] = tmp;
+    tmp += __shfl(my_uloc, i + y*5)*my_phi[i];//uloc[i  + y*n + slice*n*n]*my_phi[i];
+    // update:
+    my_uloc = tmp;
 }
 
 
-template <unsigned int n>
-__global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob, const number *coeff)
+
+template <unsigned int n, int DIM_X, int NbWarps>
+__global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob, const number *coeff, int CELL_PITCH)
 {
   const unsigned int cell = blockIdx.x;
-  const unsigned int tid = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
 
-  __shared__ number uloc[n][n][n];
-
-  // Block dmension is 5x5x5
-
+  // Block wide shared memory size
+  __shared__ number uloc[n*n*n];
+  // Warp local shared memory chunk
 
   ///////////////////////////////////////////////////////////////
   // Stage PHI in registers:
   number my_phi[n];
+
+  int x = threadIdx.x%5;
+  int y = (threadIdx.x/5)%5;
+  int slice = threadIdx.y;
+
   #pragma unroll
-  for(int i = 0; i < n; i++)
-    my_phi[i] = phi[threadIdx.x][i];
+  for(int i = 0; i < n; i++) my_phi[i] = phi[threadIdx.x%5][i];
   ///////////////////////////////////////////////////////////////
-
-
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] = src[loc2glob[cell*n*n*n+tid]];
+  const int j = threadIdx.x + threadIdx.y*DIM_X;
+  // Load global index once 
+  int global_index = loc2glob [ j + cell*CELL_PITCH];
+
+  if( j < n*n*n)
+    uloc[ j ] = src[ global_index ];
+
   __syncthreads();
 
+  number my_uloc = uloc[x + y*5 + slice*5*5];
   //---------------------------------------------------------------------------
   // Phase 2a-c: Interpolate -- reduce in each coordinate direction
   //---------------------------------------------------------------------------
   // reduce along x -- O(n*n*n*n)
-  
-  reduce_X(uloc, my_phi);
-  //reduce<X,NOTR,n> (uloc, my_phi);
   __syncthreads();
-
-  // reduce along y
-  //reduce<Y,NOTR,n> (uloc, my_phi);
-  reduce_Y(uloc, my_phi);
+  reduce_X<n>(my_uloc, my_phi,x,y);
+  reduce_Y<n>(my_uloc, my_phi,x,y);
   __syncthreads();
+  // Write back to shared
+  uloc[x + y*5 + slice*5*5] = my_uloc;
+  __syncthreads();
+  // read back to registesters in transposed fashion:
+  my_uloc = uloc[x*5*5 + y + slice*5];
 
-  reduce_Z(uloc, my_phi);
-  // reduce along z
-  //reduce<Z,NOTR,n> (uloc, my_phi);
-  // now we should have values at quadrature points
-  // no synch is necessary since we are only working on local data.
+  reduce_Z<n>(my_uloc, my_phi,x,y);
+  __syncthreads();
+  // reinsert into shared memory, transposed (this could be optimized)
+   uloc[x*5*5 + y + slice*5] = my_uloc;
+  __syncthreads();
 
   //---------------------------------------------------------------------------
   // Phase 3: apply local operations -- O(n*n*n)
   //---------------------------------------------------------------------------
-
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] *= coeff[cell*n*n*n+tid];
+  if( j < 5*5*5)
+    uloc[j ] *= coeff[j + cell*CELL_PITCH];
 
   ///////////////////////////////////////////////////////////////
   // Stage PHI in registers: - transposed
   #pragma unroll
-  for(int i = 0; i < n; i++)
-    my_phi[i] = phi[i][threadIdx.x];
-
-  __syncthreads();
-
+  for(int i = 0; i < n; i++) my_phi[i] = phi[i][threadIdx.x%5];
   //---------------------------------------------------------------------------
   // Phase 4a-c: Integrate  -- reduce with transpose
   //---------------------------------------------------------------------------
-
-  reduce_X(uloc, my_phi);
-
+  my_uloc = uloc[x + y*5 + slice*5*5];
+    __syncthreads();
+  reduce_X<n>(my_uloc, my_phi , x, y);
+  reduce_Y<n>(my_uloc, my_phi , x, y);
   __syncthreads();
-
-  // reduce along y
-  reduce_Y(uloc, my_phi);
-
+  uloc[x + y*5 + slice*5*5] = my_uloc;
   __syncthreads();
-
-  reduce_Z(uloc, my_phi);
-
-  // __syncthreads();
-  // no synch is necessary since we are only working on local data.
+  // read back to registesters in transposed fashion:
+  my_uloc = uloc[x*5*5 + y + slice*5];
+  reduce_Z<n>(my_uloc, my_phi,x,y);
+  __syncthreads();
+  uloc[x*5*5 + y + slice*5] = my_uloc;
+  __syncthreads();
 
   //---------------------------------------------------------------------------
   // Phase 5: write back to result
@@ -206,8 +209,12 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // here, we get race conditions, but in the original code, we would launch
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
-
-  dst[loc2glob[cell*n*n*n+tid]] += uloc[threadIdx.x][threadIdx.y][threadIdx.z];
+  if( j < 5*5*5)
+  {
+    // Atomic add - fire and forget!
+    atomicAdd( &dst[ global_index ], my_uloc);
+    //dst[ global_index ] += uloc[j];
+  }
 }
 
 int main(int argc, char *argv[])
@@ -263,11 +270,35 @@ int main(int argc, char *argv[])
 
   }
 
-  unsigned int *loc2glob;
-  CUDA_CHECK_SUCCESS(cudaMalloc(&loc2glob,n_local_pts*sizeof(unsigned int)));
-  CUDA_CHECK_SUCCESS(cudaMemcpy(loc2glob,loc2glob_cpu,n_local_pts*sizeof(unsigned int),
-                                cudaMemcpyHostToDevice));
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
 
+  // Added pitched memory allocation for better memory access patterns
+  // (*_*)
+  const int n = ELEM_DEGREE+1;
+  unsigned int *loc2glob;
+  size_t widthInBytes = n*n*n*sizeof(unsigned int);
+  size_t NumberOfCells = n_local_pts/(n*n*n);
+  size_t c_pitch_bytes = 0;
+  int c_pitch = 0;
+
+  cudaMallocPitch( &loc2glob, &c_pitch_bytes, widthInBytes, NumberOfCells);
+  // element pitch:
+  c_pitch = c_pitch_bytes/sizeof(unsigned int);
+
+
+  if( error_check() == -1) return -1;
+
+  // 2D memcpy
+  cudaMemcpy2D (    loc2glob, 
+                    c_pitch_bytes, 
+                    loc2glob_cpu,             // SRC
+                    widthInBytes,            // src pitch
+                    widthInBytes,             // transfer column width 
+                    NumberOfCells,          // transfer height
+                    cudaMemcpyHostToDevice);
+
+  if( error_check() == -1) return -1;
 
   number *coeff;
   CUDA_CHECK_SUCCESS(cudaMalloc(&coeff,n_local_pts*sizeof(number)));
@@ -303,9 +334,17 @@ int main(int argc, char *argv[])
   // Loop
   //---------------------------------------------------------------------------
 
-  dim3 bk_dim(ELEM_DEGREE+1,ELEM_DEGREE+1,ELEM_DEGREE+1);
-  dim3 gd_dim(n_elems);
 
+  // (*_*)
+  // Setup kernel arguments, we now have a number of warps addressed by threadIdx.y in each block,
+  // Every such warp will cover one 5*5*5 cell
+  int CELL_PITCH = c_pitch;
+  const int DIM_X = 32;
+  const int NbWarps = 5;
+  // Block dimensions and grid size:
+  int NbBlocks = NumberOfCells;
+  dim3 block(DIM_X, NbWarps);
+ 
   cudaDeviceSynchronize();
   double t = Timer();
 
@@ -313,8 +352,7 @@ int main(int argc, char *argv[])
   {
     CUDA_CHECK_SUCCESS(cudaMemset(dst, 0, n_dofs*sizeof(number)));
 
-    // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob);
-    kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff);
+   kernel<n, DIM_X, NbWarps><<<NbBlocks, block>>> (dst,src,loc2glob,coeff, CELL_PITCH);
     swap(dst,src);
   }
 
