@@ -78,6 +78,113 @@ __device__ void reduce(number *dst, const number *src)
 }
 
 
+template <unsigned int n>
+__global__ void kernel_grad(number *dst, const number *src, const unsigned int *loc2glob,
+                            const number *coeff, const number *jac)
+{
+  const unsigned int nqpts=n*n*n;
+  const unsigned int cell = blockIdx.x;
+  const unsigned int ncells = blockDim.x;
+  const unsigned int tid = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
+
+  __shared__ number values[nqpts];
+  __shared__ number gradients[3][nqpts];
+
+  //---------------------------------------------------------------------------
+  // Phase 1: read data from global array into shared memory
+  //---------------------------------------------------------------------------
+  values[tid] = src[loc2glob[cell*nqpts+tid]];
+  __syncthreads();
+
+  //---------------------------------------------------------------------------
+  // Phase 2a-c: Interpolate -- reduce in each coordinate direction
+  //---------------------------------------------------------------------------
+
+
+  // reduce along x / i / q - direction
+  reduce<X,TR,n,false,true,false> (gradients[0],values);
+  reduce<X,TR,n,false,false,false> (gradients[1],values);
+  reduce<X,TR,n,false,false,false> (gradients[2],values);
+  __syncthreads();
+
+  // reduce along y / j / r - direction
+  reduce<Y,TR,n,false,false,true> (gradients[0],gradients[0]);
+  reduce<Y,TR,n,false,true,true>  (gradients[1],gradients[1]);
+  reduce<Y,TR,n,false,false,true> (gradients[2],gradients[2]);
+  __syncthreads();
+
+  // reduce along z / k / s - direction
+  reduce<Z,TR,n,false,false,true> (gradients[0],gradients[0]);
+  reduce<Z,TR,n,false,false,true> (gradients[1],gradients[1]);
+  reduce<Z,TR,n,false,true,true>  (gradients[2],gradients[2]);
+
+  // now we should have values at quadrature points
+  // no synch is necessary since we are only working on local data.
+
+  //---------------------------------------------------------------------------
+  // Phase 3: apply local operations -- O(n*n*n)
+  //---------------------------------------------------------------------------
+
+  number grad[DIM];
+  for(int d1=0; d1<DIM; d1++) {
+    number tmp = 0;
+    for(int d2=0; d2<DIM; d2++) {
+      tmp += jac[((DIM*d2+d1)*ncells+cell)*nqpts+tid]*gradients[d2][tid];
+    }
+
+    grad[d1] = tmp;
+  }
+
+  grad[0] *= coeff[cell*nqpts+tid];
+  grad[1] *= coeff[cell*nqpts+tid];
+  grad[2] *= coeff[cell*nqpts+tid];
+
+  for(int d1=0; d1<DIM; d1++) {
+    number tmp = 0;
+    for(int d2=0; d2<DIM; d2++) {
+      tmp += jac[((DIM*d1+d2)*ncells+cell)*nqpts+tid]*grad[d2];
+    }
+    gradients[d1][tid] = tmp;
+  }
+
+  __syncthreads();
+
+  //---------------------------------------------------------------------------
+  // Phase 4a-c: Integrate  -- reduce with transpose
+  //---------------------------------------------------------------------------
+
+  reduce<X,NOTR,n,false,true,true>  (gradients[0],gradients[0]);
+  reduce<X,NOTR,n,false,false,true> (gradients[1],gradients[1]);
+  reduce<X,NOTR,n,false,false,true> (gradients[2],gradients[2]);
+  __syncthreads();
+
+  // reduce along y / j / r - direction
+  reduce<Y,NOTR,n,false,false,true> (gradients[0],gradients[0]);
+  reduce<Y,NOTR,n,false,true,true>  (gradients[1],gradients[1]);
+  reduce<Y,NOTR,n,false,false,true> (gradients[2],gradients[2]);
+  __syncthreads();
+
+  // reduce along z / k / s - direction
+  reduce<Z,NOTR,n,false,false,false> (values,gradients[0]);
+  __syncthreads();
+  reduce<Z,NOTR,n,true,false,false> (values,gradients[1]);
+  __syncthreads();
+  reduce<Z,NOTR,n,true,true,false> (values,gradients[2]);
+
+  // __syncthreads();
+  // no synch is necessary since we are only working on local data.
+
+  //---------------------------------------------------------------------------
+  // Phase 5: write back to result
+  //---------------------------------------------------------------------------
+
+  // here, we get race conditions, but in the original code, we would launch
+  // this kernel N_color times, where each launch would only work on elements
+  // that are not neighbors with each other, and hence wouldn't share any data.
+
+  dst[loc2glob[cell*nqpts+tid]] += values[tid];
+}
+
 
 template <unsigned int n>
 __global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob,
@@ -267,8 +374,8 @@ int main(int argc, char *argv[])
   {
     CUDA_CHECK_SUCCESS(cudaMemset(dst, 0, n_dofs*sizeof(number)));
 
-    // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob);
-    kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff);
+    // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff);
+    kernel_grad<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jac);
     swap(dst,src);
   }
 
