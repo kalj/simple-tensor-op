@@ -22,13 +22,15 @@ void swap(number *&a, number *&b)
 }
 
 
-__constant__ number phi[ELEM_DEGREE+1][ELEM_DEGREE+1];
+__constant__ number phi[25];
+__constant__ number dphi[25];
 
 enum Direction { X, Y, Z};
 enum Transpose { TR, NOTR};
 
-template <Direction dir, Transpose tr, unsigned int n>
-__device__ void reduce(number uloc[n][n][n])
+template <Direction dir, Transpose tr, unsigned int n,
+            bool add, bool with_gradients, bool inplace>
+__device__ void reduce(number *dst, const number *src)
 {
   // Here's what this function does for the case when dir==X and tr==TR:
 
@@ -41,56 +43,73 @@ __device__ void reduce(number uloc[n][n][n])
   // uloc[threadIdx.x][threadIdx.y][threadIdx.z] = tmp;
   //
 
-  // Then, the dir and tr parameters just change which index of uloc is
-  // reduced, and whether phi should be transposed or not, respectively.
-
-  number tmp = 0;
+  // Then, the dir and tr parameters just change which index of uloc is reduced,
+  // and whether phi should be transposed or not, respectively. with_gradients
+  // decide wether to reduce with phi or dphi. add decide wether to add to the
+  // result, and inplace decides whether src and dst are infact the same vector.
 
   const unsigned int reduction_idx = dir==X ? threadIdx.x : dir==Y ? threadIdx.y : threadIdx.z;
+
+  number tmp = 0;
 
   for(int i = 0; i < n; ++i) {
 
     const unsigned int xidx=(dir==X) ? i : threadIdx.x;
     const unsigned int yidx=(dir==Y) ? i : threadIdx.y;
     const unsigned int zidx=(dir==Z) ? i : threadIdx.z;
-    const unsigned int phi_idx1 = (tr==TR) ? i : reduction_idx;
-    const unsigned int phi_idx2 = (tr==TR) ? reduction_idx : i;
-    tmp += uloc[xidx][yidx][zidx]* phi[phi_idx1][phi_idx2];
+    const unsigned int phi_idx = (tr==TR) ? i*n+reduction_idx
+                                             : reduction_idx*n+i;
+    const unsigned int srcidx = xidx+n*yidx+n*n*zidx;
+
+    if(with_gradients)
+      tmp += dphi[phi_idx] * (inplace ? dst[srcidx] : src[srcidx]);
+    else
+      tmp += phi[phi_idx] * (inplace ? dst[srcidx] : src[srcidx]);
   }
 
-  __syncthreads();
+  if(inplace) __syncthreads();
 
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] = tmp;
+  const unsigned int dstidx = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
 
+  if(add)
+    dst[dstidx] += tmp;
+  else
+    dst[dstidx] = tmp;
 }
 
+
+
 template <unsigned int n>
-__global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob, const number *coeff)
+__global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob,
+                       const number *coeff)
 {
+  const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
   const unsigned int tid = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
 
-  __shared__ number uloc[n][n][n];
+  __shared__ number values[nqpts];
 
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] = src[loc2glob[cell*n*n*n+tid]];
+  values[tid] = src[loc2glob[cell*nqpts+tid]];
   __syncthreads();
 
   //---------------------------------------------------------------------------
   // Phase 2a-c: Interpolate -- reduce in each coordinate direction
   //---------------------------------------------------------------------------
+
+
   // reduce along x -- O(n*n*n*n)
-  reduce<X,NOTR,n> (uloc);
+  reduce<X,TR,n,false,false,true> (values,values);
   __syncthreads();
 
   // reduce along y
-  reduce<Y,NOTR,n> (uloc);
+  reduce<Y,TR,n,false,false,true> (values,values);
   __syncthreads();
 
   // reduce along z
-  reduce<Z,NOTR,n> (uloc);
+  reduce<Z,TR,n,false,false,true> (values,values);
 
   // now we should have values at quadrature points
   // no synch is necessary since we are only working on local data.
@@ -99,7 +118,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // Phase 3: apply local operations -- O(n*n*n)
   //---------------------------------------------------------------------------
 
-  uloc[threadIdx.x][threadIdx.y][threadIdx.z] *= coeff[cell*n*n*n+tid];
+  values[tid] *= coeff[cell*nqpts+tid];
 
   __syncthreads();
 
@@ -108,15 +127,15 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   //---------------------------------------------------------------------------
 
   // reduce along x
-  reduce<X,TR,n> (uloc);
+  reduce<X,NOTR,n,false,false,true> (values,values);
   __syncthreads();
 
   // reduce along y
-  reduce<Y,TR,n> (uloc);
+  reduce<Y,NOTR,n,false,false,true> (values,values);
   __syncthreads();
 
   // reduce along z
-  reduce<Z,TR,n> (uloc);
+  reduce<Z,NOTR,n,false,false,true> (values,values);
 
   // __syncthreads();
   // no synch is necessary since we are only working on local data.
@@ -129,8 +148,10 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
-  dst[loc2glob[cell*n*n*n+tid]] += uloc[threadIdx.x][threadIdx.y][threadIdx.z];
+  dst[loc2glob[cell*nqpts+tid]] += values[tid];
 }
+
+
 
 int main(int argc, char *argv[])
 {
@@ -143,6 +164,7 @@ int main(int argc, char *argv[])
 
   unsigned int *loc2glob_cpu = new unsigned int[n_local_pts];
   number *coeff_cpu = new number[n_local_pts];
+  number *jac_cpu = new number[DIM*DIM*n_local_pts];
 
   unsigned int elemcoord[DIM];
   unsigned int dofcoord[DIM];
@@ -180,7 +202,10 @@ int main(int argc, char *argv[])
       }
 
       loc2glob_cpu[e*elem_size+i] = iglob;
-      coeff_cpu[e*elem_size+i] = 1.2;
+      // coeff_cpu[e*elem_size+i] = 1.2;
+
+      // jac_cpu[(e*elem_size+i)*DIM*DIM+
+
     }
 
   }
@@ -194,6 +219,12 @@ int main(int argc, char *argv[])
   number *coeff;
   CUDA_CHECK_SUCCESS(cudaMalloc(&coeff,n_local_pts*sizeof(number)));
   CUDA_CHECK_SUCCESS(cudaMemcpy(coeff,coeff_cpu,n_local_pts*sizeof(number),
+                                cudaMemcpyHostToDevice));
+
+
+  number *jac;
+  CUDA_CHECK_SUCCESS(cudaMalloc(&jac,n_local_pts*DIM*DIM*sizeof(number)));
+  CUDA_CHECK_SUCCESS(cudaMemcpy(jac,jac_cpu,n_local_pts*DIM*DIM*sizeof(number),
                                 cudaMemcpyHostToDevice));
 
   number *src;
@@ -220,6 +251,7 @@ int main(int argc, char *argv[])
   }
 
   CUDA_CHECK_SUCCESS(cudaMemcpyToSymbol(phi, phi_cpu, sizeof(number) * 5*5));
+  CUDA_CHECK_SUCCESS(cudaMemcpyToSymbol(dphi, phi_cpu, sizeof(number) * 5*5));
 
   //---------------------------------------------------------------------------
   // Loop
