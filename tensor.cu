@@ -86,8 +86,10 @@ __device__ void reduce(number *dst, const number *src)
 
 
 template <unsigned int n>
-__global__ void kernel_grad(number *dst, const number *src, const unsigned int *loc2glob,
-                            const number *coeff, const number *jac, const number *jxw)
+__global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__ src,
+                            const unsigned int *__restrict__ loc2glob,
+                            const number *__restrict__ coeff, const number *__restrict__ jac,
+                            const number *__restrict__ jxw)
 {
   const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
@@ -198,8 +200,9 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
 
 
 template <unsigned int n>
-__global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob,
-                       const number *coeff, const number *jxw)
+__global__ void kernel(number *__restrict__ dst, const number *__restrict__ src,
+                       const unsigned int *__restrict__ loc2glob,
+                       const number *__restrict__ coeff,const number *__restrict__ jxw)
 {
   const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
