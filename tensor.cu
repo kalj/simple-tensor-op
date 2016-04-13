@@ -95,7 +95,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  values[tid] = src[loc2glob[cell*nqpts+tid]];
+  values[tid] = __ldg(&src[loc2glob[cell*nqpts+tid]]);
   __syncthreads();
 
   //---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  values[tid] = src[loc2glob[cell*nqpts+tid]];
+  values[tid] = __ldg(&src[loc2glob[cell*nqpts+tid]]);
   __syncthreads();
 
   //---------------------------------------------------------------------------
