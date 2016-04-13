@@ -80,7 +80,7 @@ __device__ void reduce(number *dst, const number *src)
 
 template <unsigned int n>
 __global__ void kernel_grad(number *dst, const number *src, const unsigned int *loc2glob,
-                            const number *coeff, const number *jac)
+                            const number *coeff, const number *jac, const number *jxw)
 {
   const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
@@ -144,7 +144,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
     for(int d2=0; d2<DIM; d2++) {
       tmp += jac[((DIM*d1+d2)*ncells+cell)*nqpts+tid]*grad[d2];
     }
-    gradients[d1][tid] = tmp;
+    gradients[d1][tid] = tmp*jxw[cell*nqpts+tid];
   }
 
   __syncthreads();
@@ -188,7 +188,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
 
 template <unsigned int n>
 __global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob,
-                       const number *coeff)
+                       const number *coeff, const number *jxw)
 {
   const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
@@ -225,7 +225,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // Phase 3: apply local operations -- O(n*n*n)
   //---------------------------------------------------------------------------
 
-  values[tid] *= coeff[cell*nqpts+tid];
+  values[tid] *= coeff[cell*nqpts+tid]*jxw[cell*nqpts+tid];
 
   __syncthreads();
 
@@ -309,9 +309,12 @@ int main(int argc, char *argv[])
       }
 
       loc2glob_cpu[e*elem_size+i] = iglob;
-      // coeff_cpu[e*elem_size+i] = 1.2;
+      coeff_cpu[e*elem_size+i] = 1.2;
 
-      // jac_cpu[(e*elem_size+i)*DIM*DIM+
+      jxw_cpu[(e*elem_size+i)] = 0.493;
+      for(int d=0; d<(DIM*DIM); ++d) {
+        jac_cpu[(d*n_elems+e)*elem_size+i] = 1.1;
+      }
 
     }
 
@@ -332,6 +335,11 @@ int main(int argc, char *argv[])
   number *jac;
   CUDA_CHECK_SUCCESS(cudaMalloc(&jac,n_local_pts*DIM*DIM*sizeof(number)));
   CUDA_CHECK_SUCCESS(cudaMemcpy(jac,jac_cpu,n_local_pts*DIM*DIM*sizeof(number),
+                                cudaMemcpyHostToDevice));
+
+  number *jxw;
+  CUDA_CHECK_SUCCESS(cudaMalloc(&jxw,n_local_pts*sizeof(number)));
+  CUDA_CHECK_SUCCESS(cudaMemcpy(jxw,jxw_cpu,n_local_pts*sizeof(number),
                                 cudaMemcpyHostToDevice));
 
   number *src;
@@ -374,8 +382,8 @@ int main(int argc, char *argv[])
   {
     CUDA_CHECK_SUCCESS(cudaMemset(dst, 0, n_dofs*sizeof(number)));
 
-    // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff);
-    kernel_grad<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jac);
+    // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jxw);
+    kernel_grad<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jac,jxw);
     swap(dst,src);
   }
 
@@ -392,12 +400,16 @@ int main(int argc, char *argv[])
 
   CUDA_CHECK_SUCCESS(cudaFree(loc2glob));
   CUDA_CHECK_SUCCESS(cudaFree(coeff));
+  CUDA_CHECK_SUCCESS(cudaFree(jac));
+  CUDA_CHECK_SUCCESS(cudaFree(jxw));
   CUDA_CHECK_SUCCESS(cudaFree(dst));
   CUDA_CHECK_SUCCESS(cudaFree(src));
 
   delete[] cpu_arr;
   delete[] loc2glob_cpu;
   delete[] coeff_cpu;
+  delete[] jac_cpu;
+  delete[] jxw_cpu;
 
   return 0;
 }
