@@ -33,9 +33,9 @@ __constant__ number dphi[25];
 enum Direction { X, Y, Z};
 enum Transpose { TR, NOTR};
 
-template <Direction dir, Transpose tr, unsigned int n,
-            bool add, bool with_gradients, bool inplace>
-__device__ void reduce(number *dst, const number *src)
+template <Direction dir, unsigned int n,
+            bool add, bool inplace>
+__device__ void reduce(number *dst, const number *src, const number myphi[n])
 {
   // Here's what this function does for the case when dir==X and tr==TR:
 
@@ -57,18 +57,12 @@ __device__ void reduce(number *dst, const number *src)
 
   for(int i = 0; i < n; ++i) {
 
-    const unsigned int phi_idx = (tr==TR) ? i*n+threadIdx.x
-                                             : threadIdx.x*n+i;
     const unsigned int srcidx =
         (dir==X) ? (i + n*(threadIdx.y + n*threadIdx.z))
         : (dir==Y) ? (threadIdx.z + n*(i + n*threadIdx.y))
         : (threadIdx.y + n*(threadIdx.z + n*i));
 
-
-    if(with_gradients)
-      tmp += dphi[phi_idx] * (inplace ? dst[srcidx] : src[srcidx]);
-    else
-      tmp += phi[phi_idx] * (inplace ? dst[srcidx] : src[srcidx]);
+      tmp += myphi[i] * (inplace ? dst[srcidx] : src[srcidx]);
   }
 
   if(inplace) __syncthreads();
@@ -99,6 +93,17 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
   __shared__ number values[nqpts];
   __shared__ number gradients[3][nqpts];
 
+  ///////////////////////////////////////////////////////////////
+  // Stage PHI and DPHI in registers:
+  number my_phi[n];
+  number my_dphi[n];
+#pragma unroll
+  for(int i = 0; i < n; i++) {
+    my_phi[i] = phi[threadIdx.x*n+i];
+    my_dphi[i] = dphi[threadIdx.x*n+i];
+  }
+  ///////////////////////////////////////////////////////////////
+
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
@@ -111,21 +116,21 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
 
 
   // reduce along x / i / q - direction
-  reduce<X,TR,n,false,true,false> (gradients[0],values);
-  reduce<X,TR,n,false,false,false> (gradients[1],values);
-  reduce<X,TR,n,false,false,false> (gradients[2],values);
+  reduce<X,n,false,false> (gradients[0],values,my_dphi);
+  reduce<X,n,false,false> (gradients[1],values,my_phi);
+  reduce<X,n,false,false> (gradients[2],values,my_phi);
   __syncthreads();
 
   // reduce along y / j / r - direction
-  reduce<Y,TR,n,false,false,true> (gradients[0],gradients[0]);
-  reduce<Y,TR,n,false,true,true>  (gradients[1],gradients[1]);
-  reduce<Y,TR,n,false,false,true> (gradients[2],gradients[2]);
+  reduce<Y,n,false,true> (gradients[0],gradients[0],my_phi);
+  reduce<Y,n,false,true>  (gradients[1],gradients[1],my_dphi);
+  reduce<Y,n,false,true> (gradients[2],gradients[2],my_phi);
   __syncthreads();
 
   // reduce along z / k / s - direction
-  reduce<Z,TR,n,false,false,true> (gradients[0],gradients[0]);
-  reduce<Z,TR,n,false,false,true> (gradients[1],gradients[1]);
-  reduce<Z,TR,n,false,true,true>  (gradients[2],gradients[2]);
+  reduce<Z,n,false,true> (gradients[0],gradients[0],my_phi);
+  reduce<Z,n,false,true> (gradients[1],gradients[1],my_phi);
+  reduce<Z,n,false,true>  (gradients[2],gradients[2],my_dphi);
 
   __syncthreads();
   // now we should have values at quadrature points
@@ -156,29 +161,41 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
     gradients[d1][tid] = tmp*jxw[cell*ROWLENGTH+tid];
   }
 
+
   __syncthreads();
+  ///////////////////////////////////////////////////////////////
+  // Stage transpose of PHI and DPHI in registers:
+#pragma unroll
+  for(int i = 0; i < n; i++) {
+    my_phi[i] = phi[threadIdx.x+n*i];
+    my_dphi[i] = dphi[threadIdx.x+n*i];
+  }
+  ///////////////////////////////////////////////////////////////
+
+  __syncthreads();
+
 
   //---------------------------------------------------------------------------
   // Phase 4a-c: Integrate  -- reduce with transpose
   //---------------------------------------------------------------------------
 
-  reduce<X,NOTR,n,false,true,true>  (gradients[0],gradients[0]);
-  reduce<X,NOTR,n,false,false,true> (gradients[1],gradients[1]);
-  reduce<X,NOTR,n,false,false,true> (gradients[2],gradients[2]);
+  reduce<X,n,false,true>  (gradients[0],gradients[0],my_dphi);
+  reduce<X,n,false,true> (gradients[1],gradients[1],my_phi);
+  reduce<X,n,false,true> (gradients[2],gradients[2],my_phi);
   __syncthreads();
 
   // reduce along y / j / r - direction
-  reduce<Y,NOTR,n,false,false,true> (gradients[0],gradients[0]);
-  reduce<Y,NOTR,n,false,true,true>  (gradients[1],gradients[1]);
-  reduce<Y,NOTR,n,false,false,true> (gradients[2],gradients[2]);
+  reduce<Y,n,false,true> (gradients[0],gradients[0],my_phi);
+  reduce<Y,n,false,true>  (gradients[1],gradients[1],my_dphi);
+  reduce<Y,n,false,true> (gradients[2],gradients[2],my_phi);
   __syncthreads();
 
   // reduce along z / k / s - direction
-  reduce<Z,NOTR,n,false,false,false> (values,gradients[0]);
+  reduce<Z,n,false,false> (values,gradients[0],my_phi);
   __syncthreads();
-  reduce<Z,NOTR,n,true,false,false> (values,gradients[1]);
+  reduce<Z,n,true,false> (values,gradients[1],my_phi);
   __syncthreads();
-  reduce<Z,NOTR,n,true,true,false> (values,gradients[2]);
+  reduce<Z,n,true,false> (values,gradients[2],my_dphi);
 
   __syncthreads();
   // no synch is necessary since we are only working on local data.
@@ -210,6 +227,15 @@ __global__ void kernel(number *__restrict__ dst, const number *__restrict__ src,
 
   __shared__ number values[nqpts];
 
+  ///////////////////////////////////////////////////////////////
+  // Stage PHI in registers:
+  number my_phi[n];
+#pragma unroll
+  for(int i = 0; i < n; i++) {
+    my_phi[i] = phi[threadIdx.x*n+i];
+  }
+  ///////////////////////////////////////////////////////////////
+
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
@@ -222,15 +248,15 @@ __global__ void kernel(number *__restrict__ dst, const number *__restrict__ src,
 
 
   // reduce along x -- O(n*n*n*n)
-  reduce<X,TR,n,false,false,true> (values,values);
+  reduce<X,n,false,true> (values,values,my_phi);
   __syncthreads();
 
   // reduce along y
-  reduce<Y,TR,n,false,false,true> (values,values);
+  reduce<Y,n,false,true> (values,values,my_phi);
   __syncthreads();
 
   // reduce along z
-  reduce<Z,TR,n,false,false,true> (values,values);
+  reduce<Z,n,false,true> (values,values,my_phi);
 
   // now we should have values at quadrature points
   // no synch is necessary since we are only working on local data.
@@ -243,20 +269,29 @@ __global__ void kernel(number *__restrict__ dst, const number *__restrict__ src,
 
   __syncthreads();
 
+  ///////////////////////////////////////////////////////////////
+  // Stage PHI in registers: - transpose
+#pragma unroll
+  for(int i = 0; i < n; i++) {
+    my_phi[i] = phi[threadIdx.x+n*i];
+  }
+  ///////////////////////////////////////////////////////////////
+  __syncthreads();
+
   //---------------------------------------------------------------------------
   // Phase 4a-c: Integrate  -- reduce with transpose
   //---------------------------------------------------------------------------
 
   // reduce along x
-  reduce<X,NOTR,n,false,false,true> (values,values);
+  reduce<X,n,false,true> (values,values,my_phi);
   __syncthreads();
 
   // reduce along y
-  reduce<Y,NOTR,n,false,false,true> (values,values);
+  reduce<Y,n,false,true> (values,values,my_phi);
   __syncthreads();
 
   // reduce along z
-  reduce<Z,NOTR,n,false,false,true> (values,values);
+  reduce<Z,n,false,true> (values,values,my_phi);
 
   // __syncthreads();
   // no synch is necessary since we are only working on local data.
