@@ -272,6 +272,7 @@ int main(int argc, char *argv[])
   unsigned int *loc2glob_cpu = new unsigned int[n_local_pts];
   number *coeff_cpu = new number[n_local_pts];
   number *jac_cpu = new number[DIM*DIM*n_local_pts];
+  number *jxw_cpu = new number[n_local_pts];
 
   unsigned int elemcoord[DIM];
   unsigned int dofcoord[DIM];
