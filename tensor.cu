@@ -55,6 +55,7 @@ __device__ void reduce(number *dst, const number *src, const number myphi[n])
 
   number tmp = 0;
 
+#pragma unroll
   for(int i = 0; i < n; ++i) {
 
     const unsigned int srcidx =
@@ -141,8 +142,10 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
   //---------------------------------------------------------------------------
 
   number grad[DIM];
+#pragma unroll
   for(int d1=0; d1<DIM; d1++) {
     number tmp = 0;
+#pragma unroll
     for(int d2=0; d2<DIM; d2++) {
       tmp += jac[((DIM*d2+d1)*ncells+cell)*ROWLENGTH+tid]*gradients[d2][tid];
     }
@@ -153,8 +156,10 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
   grad[1] *= coeff[cell*ROWLENGTH+tid];
   grad[2] *= coeff[cell*ROWLENGTH+tid];
 
+#pragma unroll
   for(int d1=0; d1<DIM; d1++) {
     number tmp = 0;
+#pragma unroll
     for(int d2=0; d2<DIM; d2++) {
       tmp += jac[((DIM*d1+d2)*ncells+cell)*ROWLENGTH+tid]*grad[d2];
     }
