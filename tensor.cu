@@ -84,7 +84,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
 {
   const unsigned int nqpts=n*n*n;
   const unsigned int cell = blockIdx.x;
-  const unsigned int ncells = blockDim.x;
+  const unsigned int ncells = gridDim.x;
   const unsigned int tid = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
 
   __shared__ number values[nqpts];
