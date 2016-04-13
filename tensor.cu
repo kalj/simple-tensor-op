@@ -48,18 +48,17 @@ __device__ void reduce(number *dst, const number *src)
   // decide wether to reduce with phi or dphi. add decide wether to add to the
   // result, and inplace decides whether src and dst are infact the same vector.
 
-  const unsigned int reduction_idx = dir==X ? threadIdx.x : dir==Y ? threadIdx.y : threadIdx.z;
-
   number tmp = 0;
 
   for(int i = 0; i < n; ++i) {
 
-    const unsigned int xidx=(dir==X) ? i : threadIdx.x;
-    const unsigned int yidx=(dir==Y) ? i : threadIdx.y;
-    const unsigned int zidx=(dir==Z) ? i : threadIdx.z;
-    const unsigned int phi_idx = (tr==TR) ? i*n+reduction_idx
-                                             : reduction_idx*n+i;
-    const unsigned int srcidx = xidx+n*yidx+n*n*zidx;
+    const unsigned int phi_idx = (tr==TR) ? i*n+threadIdx.x
+                                             : threadIdx.x*n+i;
+    const unsigned int srcidx =
+        (dir==X) ? (i + n*(threadIdx.y + n*threadIdx.z))
+        : (dir==Y) ? (threadIdx.z + n*(i + n*threadIdx.y))
+        : (threadIdx.y + n*(threadIdx.z + n*i));
+
 
     if(with_gradients)
       tmp += dphi[phi_idx] * (inplace ? dst[srcidx] : src[srcidx]);
@@ -69,7 +68,10 @@ __device__ void reduce(number *dst, const number *src)
 
   if(inplace) __syncthreads();
 
-  const unsigned int dstidx = threadIdx.x+n*threadIdx.y + n*n*threadIdx.z;
+  const unsigned int dstidx =
+      (dir==X) ? (threadIdx.x + n*(threadIdx.y + n*threadIdx.z))
+      : (dir==Y) ? (threadIdx.z + n*(threadIdx.x + n*threadIdx.y))
+      : (threadIdx.y + n*(threadIdx.z + n*threadIdx.x));
 
   if(add)
     dst[dstidx] += tmp;
