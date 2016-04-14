@@ -375,6 +375,10 @@ int main(int argc, char *argv[])
   // Loop
   //---------------------------------------------------------------------------
 
+  if(sizeof(number) == 8) {
+    cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
+  }
+
   dim3 bk_dim(ELEM_DEGREE+1,ELEM_DEGREE+1,ELEM_DEGREE+1);
   dim3 gd_dim(n_elems);
 
