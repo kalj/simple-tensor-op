@@ -11,6 +11,7 @@
 #define ELEM_DEGREE 4
 #define DIM 3
 #define N_ITERATIONS 100
+#define ROWLENGTH 128
 
 typedef double number;
 
@@ -95,7 +96,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  values[tid] = __ldg(&src[loc2glob[cell*nqpts+tid]]);
+  values[tid] = __ldg(&src[loc2glob[cell*ROWLENGTH+tid]]);
   __syncthreads();
 
   //---------------------------------------------------------------------------
@@ -131,22 +132,21 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   for(int d1=0; d1<DIM; d1++) {
     number tmp = 0;
     for(int d2=0; d2<DIM; d2++) {
-      tmp += jac[((DIM*d2+d1)*ncells+cell)*nqpts+tid]*gradients[d2][tid];
+      tmp += jac[((DIM*d2+d1)*ncells+cell)*ROWLENGTH+tid]*gradients[d2][tid];
     }
-
     grad[d1] = tmp;
   }
 
-  grad[0] *= coeff[cell*nqpts+tid];
-  grad[1] *= coeff[cell*nqpts+tid];
-  grad[2] *= coeff[cell*nqpts+tid];
+  grad[0] *= coeff[cell*ROWLENGTH+tid];
+  grad[1] *= coeff[cell*ROWLENGTH+tid];
+  grad[2] *= coeff[cell*ROWLENGTH+tid];
 
   for(int d1=0; d1<DIM; d1++) {
     number tmp = 0;
     for(int d2=0; d2<DIM; d2++) {
-      tmp += jac[((DIM*d1+d2)*ncells+cell)*nqpts+tid]*grad[d2];
+      tmp += jac[((DIM*d1+d2)*ncells+cell)*ROWLENGTH+tid]*grad[d2];
     }
-    gradients[d1][tid] = tmp*jxw[cell*nqpts+tid];
+    gradients[d1][tid] = tmp*jxw[cell*ROWLENGTH+tid];
   }
 
   __syncthreads();
@@ -184,7 +184,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
-  dst[loc2glob[cell*nqpts+tid]] += values[tid];
+  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
 }
 
 
@@ -201,7 +201,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   //---------------------------------------------------------------------------
   // Phase 1: read data from global array into shared memory
   //---------------------------------------------------------------------------
-  values[tid] = __ldg(&src[loc2glob[cell*nqpts+tid]]);
+  values[tid] = __ldg(&src[loc2glob[cell*ROWLENGTH+tid]]);
   __syncthreads();
 
   //---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // Phase 3: apply local operations -- O(n*n*n)
   //---------------------------------------------------------------------------
 
-  values[tid] *= coeff[cell*nqpts+tid]*jxw[cell*nqpts+tid];
+  values[tid] *= coeff[cell*ROWLENGTH+tid]*jxw[cell*ROWLENGTH+tid];
 
   __syncthreads();
 
@@ -257,7 +257,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
-  dst[loc2glob[cell*nqpts+tid]] += values[tid];
+  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
 }
 
 
@@ -268,7 +268,7 @@ int main(int argc, char *argv[])
   const unsigned int n_dofs = ipowf((NSUBDIV)*ELEM_DEGREE+1,DIM);
   const unsigned int n_elems = ipowf(NSUBDIV,DIM);
   const unsigned int elem_size = ipowf(ELEM_DEGREE+1,DIM);
-  const unsigned int n_local_pts = n_elems*elem_size;
+  const unsigned int n_local_pts = n_elems*ROWLENGTH;
 
 
   unsigned int *loc2glob_cpu = new unsigned int[n_local_pts];
@@ -311,12 +311,12 @@ int main(int argc, char *argv[])
         iglob = iglob*n_dofs_1d + dofcoord[DIM-1-d] + elemcoord[DIM-1-d]*ELEM_DEGREE;
       }
 
-      loc2glob_cpu[e*elem_size+i] = iglob;
-      coeff_cpu[e*elem_size+i] = 1.2;
+      loc2glob_cpu[e*ROWLENGTH+i] = iglob;
+      coeff_cpu[e*ROWLENGTH+i] = 1.2;
 
       jxw_cpu[(e*elem_size+i)] = 0.493;
       for(int d=0; d<(DIM*DIM); ++d) {
-        jac_cpu[(d*n_elems+e)*elem_size+i] = 1.1;
+        jac_cpu[(d*n_elems+e)*ROWLENGTH+i] = 1.1;
       }
 
     }
