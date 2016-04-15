@@ -85,6 +85,18 @@ __device__ void reduce(number uloc[n][n][n], number my_phi[n])
 }
 
 
+template<class T>
+__device__ bool TypeIsFloat()
+{
+  return false;
+}
+template<>
+__device__ bool TypeIsFloat<float>()
+{
+  return true;
+}
+
+
 
 template <unsigned int n>
 __device__  void reduce_X(number my_uloc, number my_phi[n], int x, int y)
@@ -123,23 +135,29 @@ __device__ __forceinline__ void reduce_Z(number my_uloc, number my_phi[n], int x
 
 
 
+/*
+  We configure the block to have one warp work on a 5x5 "slice" at a time with a total of 5 warps in the block
+  Data is staged in and out of shared memory into registers.
+  When the data is in registers we use the more efficient warp shuffle to communicate data both in
+  x & y direction of the 5x5 slice.
+
+*/
 template <unsigned int n, int DIM_X, int NbWarps>
 __global__ void kernel(number *dst, const number *src, const unsigned int *loc2glob, const number *coeff, int CELL_PITCH)
 {
   const unsigned int cell = blockIdx.x;
 
-  // Block wide shared memory size
   __shared__ number uloc[n*n*n];
-  // Warp local shared memory chunk
-
   ///////////////////////////////////////////////////////////////
   // Stage PHI in registers:
   number my_phi[n];
 
+  // Setup one 5x5 slice per warp
   int x = threadIdx.x%5;
   int y = (threadIdx.x/5)%5;
   int slice = threadIdx.y;
 
+  // Stage PHI untransposed
   #pragma unroll
   for(int i = 0; i < n; i++) my_phi[i] = phi[threadIdx.x%5][i];
   ///////////////////////////////////////////////////////////////
@@ -159,15 +177,19 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   //---------------------------------------------------------------------------
   // Phase 2a-c: Interpolate -- reduce in each coordinate direction
   //---------------------------------------------------------------------------
-  // reduce along x -- O(n*n*n*n)
+  
   __syncthreads();
+  
+  // reduce in x-dir
   reduce_X<n>(my_uloc, my_phi,x,y);
+  // reduce in y-dir
   reduce_Y<n>(my_uloc, my_phi,x,y);
   __syncthreads();
   // Write back to shared
   uloc[x + y*5 + slice*5*5] = my_uloc;
   __syncthreads();
   // read back to registesters in transposed fashion:
+  // each 5x5 slice is now directed in the z direction.
   my_uloc = uloc[x*5*5 + y + slice*5];
 
   reduce_Z<n>(my_uloc, my_phi,x,y);
@@ -196,7 +218,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   __syncthreads();
   uloc[x + y*5 + slice*5*5] = my_uloc;
   __syncthreads();
-  // read back to registesters in transposed fashion:
+  // read back to registers in transposed fashion:
   my_uloc = uloc[x*5*5 + y + slice*5];
   reduce_Z<n>(my_uloc, my_phi,x,y);
   __syncthreads();
@@ -212,8 +234,10 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   if( j < 5*5*5)
   {
     // Atomic add - fire and forget!
-    atomicAdd( &dst[ global_index ], my_uloc);
-    //dst[ global_index ] += uloc[j];
+    if( TypeIsFloat<number>() )
+      atomicAdd( &dst[ global_index ], my_uloc);
+    else
+      dst[ global_index ] +=  uloc[j];
   }
 }
 
