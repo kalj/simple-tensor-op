@@ -99,7 +99,7 @@ __device__ bool TypeIsFloat<float>()
 
 
 template <unsigned int n>
-__device__  void reduce_X(number my_uloc, number my_phi[n], int x, int y)
+__device__  void reduce_X(number &my_uloc, number my_phi[n], int x, int y)
 {
   
   number tmp = 0.0f;
@@ -110,7 +110,7 @@ __device__  void reduce_X(number my_uloc, number my_phi[n], int x, int y)
     my_uloc = tmp;
 }
 template <unsigned int n>
-__device__ __forceinline__ void reduce_Y(number my_uloc, number my_phi[n], int x, int y)
+__device__ __forceinline__ void reduce_Y(number &my_uloc, number my_phi[n], int x, int y)
 {
 
   number tmp = 0.0f;
@@ -122,7 +122,7 @@ __device__ __forceinline__ void reduce_Y(number my_uloc, number my_phi[n], int x
 }
 
 template <unsigned int n>
-__device__ __forceinline__ void reduce_Z(number my_uloc, number my_phi[n], int x, int y)
+__device__ __forceinline__ void reduce_Z(number &my_uloc, number my_phi[n], int x, int y)
 {
 
    number tmp = 0.0f;
