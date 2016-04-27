@@ -99,8 +99,8 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
   number my_dphi[n];
 #pragma unroll
   for(int i = 0; i < n; i++) {
-    my_phi[i] = phi[threadIdx.x*n+i];
-    my_dphi[i] = dphi[threadIdx.x*n+i];
+    my_phi[i] = phi[threadIdx.x + n*i];
+    my_dphi[i] = dphi[threadIdx.x + n*i];
   }
   ///////////////////////////////////////////////////////////////
 
@@ -167,8 +167,8 @@ __global__ void kernel_grad(number *__restrict__ dst, const number *__restrict__
   // Stage transpose of PHI and DPHI in registers:
 #pragma unroll
   for(int i = 0; i < n; i++) {
-    my_phi[i] = phi[threadIdx.x+n*i];
-    my_dphi[i] = dphi[threadIdx.x+n*i];
+    my_phi[i] = phi[threadIdx.x*n + i];
+    my_dphi[i] = dphi[threadIdx.x*n + i];
   }
   ///////////////////////////////////////////////////////////////
 
