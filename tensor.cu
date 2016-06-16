@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "cuda_utils.cuh"
 #include "timer.h"
+#include "atomic.cuh"
 
 #define NSUBDIV (1<<5)
 #define ELEM_DEGREE 4
@@ -184,7 +185,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
-  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
+  atomicAddWrapper(&dst[loc2glob[cell*ROWLENGTH+tid]],values[tid]);
 }
 
 
@@ -257,7 +258,7 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
-  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
+  atomicAddWrapper(&dst[loc2glob[cell*ROWLENGTH+tid]],values[tid]);
 }
 
 
@@ -374,6 +375,7 @@ int main(int argc, char *argv[])
   //---------------------------------------------------------------------------
   // Loop
   //---------------------------------------------------------------------------
+  printf("Setup done\n");
 
   if(sizeof(number) == 8) {
     cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
@@ -391,6 +393,7 @@ int main(int argc, char *argv[])
 
     // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jxw);
     kernel_grad<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jac,jxw);
+    CUDA_CHECK_LAST;
     swap(dst,src);
   }
 
