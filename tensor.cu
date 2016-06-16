@@ -8,11 +8,14 @@
 #include "timer.h"
 #include "atomic.cuh"
 
+#include <vector>
+
 #define NSUBDIV (1<<5)
 #define ELEM_DEGREE 4
 #define DIM 3
 #define N_ITERATIONS 100
 #define ROWLENGTH 128
+#define NUMCOLORS 8
 
 typedef double number;
 
@@ -122,6 +125,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   reduce<Z,TR,n,false,false,true> (gradients[1],gradients[1]);
   reduce<Z,TR,n,false,true,true>  (gradients[2],gradients[2]);
 
+  __syncthreads();
   // now we should have values at quadrature points
   // no synch is necessary since we are only working on local data.
 
@@ -174,7 +178,7 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   __syncthreads();
   reduce<Z,NOTR,n,true,true,false> (values,gradients[2]);
 
-  // __syncthreads();
+  __syncthreads();
   // no synch is necessary since we are only working on local data.
 
   //---------------------------------------------------------------------------
@@ -185,7 +189,11 @@ __global__ void kernel_grad(number *dst, const number *src, const unsigned int *
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
+#if NUMCOLORS == 1
   atomicAddWrapper(&dst[loc2glob[cell*ROWLENGTH+tid]],values[tid]);
+#else
+  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
+#endif
 }
 
 
@@ -258,24 +266,31 @@ __global__ void kernel(number *dst, const number *src, const unsigned int *loc2g
   // this kernel N_color times, where each launch would only work on elements
   // that are not neighbors with each other, and hence wouldn't share any data.
 
+#if NUMCOLORS == 1
   atomicAddWrapper(&dst[loc2glob[cell*ROWLENGTH+tid]],values[tid]);
+#else
+  dst[loc2glob[cell*ROWLENGTH+tid]] += values[tid];
+#endif
 }
 
 
 
 int main(int argc, char *argv[])
 {
-
   const unsigned int n_dofs = ipowf((NSUBDIV)*ELEM_DEGREE+1,DIM);
   const unsigned int n_elems = ipowf(NSUBDIV,DIM);
   const unsigned int elem_size = ipowf(ELEM_DEGREE+1,DIM);
   const unsigned int n_local_pts = n_elems*ROWLENGTH;
 
+  std::vector<unsigned int> n_cells(NUMCOLORS);
+  for(int c=0; c<NUMCOLORS; ++c)
+    n_cells[c] = 0;
 
-  unsigned int *loc2glob_cpu = new unsigned int[n_local_pts];
-  number *coeff_cpu = new number[n_local_pts];
-  number *jac_cpu = new number[DIM*DIM*n_local_pts];
-  number *jxw_cpu = new number[n_local_pts];
+  std::vector<std::vector<unsigned int>> loc2glob_cpu(NUMCOLORS);
+  std::vector<std::vector<number>> coeff_cpu(NUMCOLORS);
+  std::vector<std::vector<number>> jxw_cpu(NUMCOLORS);
+  std::vector<std::vector<number>> jac_cpu(NUMCOLORS);
+
 
   unsigned int elemcoord[DIM];
   unsigned int dofcoord[DIM];
@@ -286,6 +301,11 @@ int main(int argc, char *argv[])
   //---------------------------------------------------------------------------
   // setup
   //---------------------------------------------------------------------------
+
+  std::vector<unsigned int> loc2glob_tmp(ROWLENGTH);
+  std::vector<number> coeff_tmp(ROWLENGTH);
+  std::vector<number> jac_tmp(DIM*DIM*ROWLENGTH);
+  std::vector<number> jxw_tmp(ROWLENGTH);
 
   for(int e = 0; e < n_elems; ++e) {
     unsigned int a = 1;
@@ -312,39 +332,75 @@ int main(int argc, char *argv[])
         iglob = iglob*n_dofs_1d + dofcoord[DIM-1-d] + elemcoord[DIM-1-d]*ELEM_DEGREE;
       }
 
-      loc2glob_cpu[e*ROWLENGTH+i] = iglob;
-      coeff_cpu[e*ROWLENGTH+i] = 1.2;
+      loc2glob_tmp[i] = iglob;
+      coeff_tmp[i] = 1.2;
 
-      jxw_cpu[(e*elem_size+i)] = 0.493;
+      jxw_tmp[i] = 0.493;
       for(int d=0; d<(DIM*DIM); ++d) {
-        jac_cpu[(d*n_elems+e)*ROWLENGTH+i] = 1.1;
+        jac_tmp[d*elem_size+i] = 1.1;
       }
 
     }
 
+    unsigned int color = 0;
+    if(NUMCOLORS > 1) {
+      color = elemcoord[0] % 2 + 2*(elemcoord[1]%2) + 4*(elemcoord[2]%2);
+    }
+
+    loc2glob_cpu[color].insert(loc2glob_cpu[color].end(),
+                                loc2glob_tmp.begin(),
+                                loc2glob_tmp.end());
+
+    coeff_cpu[color].insert(coeff_cpu[color].end(),
+                             coeff_tmp.begin(),
+                             coeff_tmp.end());
+
+    jxw_cpu[color].insert(jxw_cpu[color].end(),
+                           jxw_tmp.begin(),
+                           jxw_tmp.end());
+
+    jac_cpu[color].insert(jac_cpu[color].end(),
+                           jac_tmp.begin(),
+                           jac_tmp.end());
+    n_cells[color]++;
+
   }
 
-  unsigned int *loc2glob;
-  CUDA_CHECK_SUCCESS(cudaMalloc(&loc2glob,n_local_pts*sizeof(unsigned int)));
-  CUDA_CHECK_SUCCESS(cudaMemcpy(loc2glob,loc2glob_cpu,n_local_pts*sizeof(unsigned int),
-                                cudaMemcpyHostToDevice));
+  std::vector<unsigned int *> loc2glob(NUMCOLORS);
+  std::vector<number *> coeff(NUMCOLORS);
+  std::vector<number *> jac(NUMCOLORS);
+  std::vector<number *> jxw(NUMCOLORS);
 
+  for(int c=0; c<NUMCOLORS; ++c) {
+    {
+      unsigned int size = ROWLENGTH*n_cells[c]*sizeof(unsigned int);
+      CUDA_CHECK_SUCCESS(cudaMalloc(&loc2glob[c],size));
+      CUDA_CHECK_SUCCESS(cudaMemcpy(loc2glob[c],loc2glob_cpu[c].data(),
+                                    size, cudaMemcpyHostToDevice));
+    }
 
-  number *coeff;
-  CUDA_CHECK_SUCCESS(cudaMalloc(&coeff,n_local_pts*sizeof(number)));
-  CUDA_CHECK_SUCCESS(cudaMemcpy(coeff,coeff_cpu,n_local_pts*sizeof(number),
-                                cudaMemcpyHostToDevice));
+    {
+      unsigned int size = ROWLENGTH*n_cells[c]*sizeof(number);
+      CUDA_CHECK_SUCCESS(cudaMalloc(&coeff[c],size));
+      CUDA_CHECK_SUCCESS(cudaMemcpy(coeff[c],coeff_cpu[c].data(),
+                                    size, cudaMemcpyHostToDevice));
+    }
 
+    {
+      unsigned int size = ROWLENGTH*n_cells[c]*DIM*DIM*sizeof(number);
+      CUDA_CHECK_SUCCESS(cudaMalloc(&jac[c],size));
+      CUDA_CHECK_SUCCESS(cudaMemcpy(jac[c],jac_cpu[c].data(),
+                                    size, cudaMemcpyHostToDevice));
+    }
 
-  number *jac;
-  CUDA_CHECK_SUCCESS(cudaMalloc(&jac,n_local_pts*DIM*DIM*sizeof(number)));
-  CUDA_CHECK_SUCCESS(cudaMemcpy(jac,jac_cpu,n_local_pts*DIM*DIM*sizeof(number),
-                                cudaMemcpyHostToDevice));
+    {
+      unsigned int size = ROWLENGTH*n_cells[c]*sizeof(number);
+      CUDA_CHECK_SUCCESS(cudaMalloc(&jxw[c],size));
+      CUDA_CHECK_SUCCESS(cudaMemcpy(jxw[c],jxw_cpu[c].data(),
+                                    size, cudaMemcpyHostToDevice));
+    }
 
-  number *jxw;
-  CUDA_CHECK_SUCCESS(cudaMalloc(&jxw,n_local_pts*sizeof(number)));
-  CUDA_CHECK_SUCCESS(cudaMemcpy(jxw,jxw_cpu,n_local_pts*sizeof(number),
-                                cudaMemcpyHostToDevice));
+  }
 
   number *src;
   number *dst;
@@ -382,7 +438,10 @@ int main(int argc, char *argv[])
   }
 
   dim3 bk_dim(ELEM_DEGREE+1,ELEM_DEGREE+1,ELEM_DEGREE+1);
-  dim3 gd_dim(n_elems);
+  dim3 gd_dim[NUMCOLORS];
+
+  for(int c=0; c<NUMCOLORS; ++c)
+    gd_dim[c] = dim3(n_cells[c]);
 
   cudaDeviceSynchronize();
   double t = Timer();
@@ -392,8 +451,11 @@ int main(int argc, char *argv[])
     CUDA_CHECK_SUCCESS(cudaMemset(dst, 0, n_dofs*sizeof(number)));
 
     // kernel<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jxw);
-    kernel_grad<ELEM_DEGREE+1> <<<gd_dim,bk_dim>>> (dst,src,loc2glob,coeff,jac,jxw);
-    CUDA_CHECK_LAST;
+    for(int c=0; c<NUMCOLORS; ++c) {
+      kernel_grad<ELEM_DEGREE+1> <<<gd_dim[c],bk_dim>>> (dst,src,loc2glob[c],coeff[c],
+                                                         jac[c],jxw[c]);
+      CUDA_CHECK_LAST;
+    }
     swap(dst,src);
   }
 
@@ -408,18 +470,16 @@ int main(int argc, char *argv[])
   printf("Time: %8.4g s (%d iterations)\n",t,N_ITERATIONS);
   printf("Per iteration: %8.4g s\n",t/N_ITERATIONS);
 
-  CUDA_CHECK_SUCCESS(cudaFree(loc2glob));
-  CUDA_CHECK_SUCCESS(cudaFree(coeff));
-  CUDA_CHECK_SUCCESS(cudaFree(jac));
-  CUDA_CHECK_SUCCESS(cudaFree(jxw));
+  for(int c=0; c<NUMCOLORS; ++c) {
+    CUDA_CHECK_SUCCESS(cudaFree(loc2glob[c]));
+    CUDA_CHECK_SUCCESS(cudaFree(coeff[c]));
+    CUDA_CHECK_SUCCESS(cudaFree(jac[c]));
+    CUDA_CHECK_SUCCESS(cudaFree(jxw[c]));
+  }
   CUDA_CHECK_SUCCESS(cudaFree(dst));
   CUDA_CHECK_SUCCESS(cudaFree(src));
 
   delete[] cpu_arr;
-  delete[] loc2glob_cpu;
-  delete[] coeff_cpu;
-  delete[] jac_cpu;
-  delete[] jxw_cpu;
 
   return 0;
 }
